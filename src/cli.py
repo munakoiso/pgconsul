@@ -15,7 +15,7 @@ import logging
 from . import read_config, init_logging, zk as zookeeper
 from . import helpers
 from . import utils
-from .exceptions import SwitchoverException
+from .exceptions import SwitchoverException, FailoverException, ResetException
 
 
 class ParseHosts(argparse.Action):
@@ -163,6 +163,47 @@ def switchover(opts, conf):
     except SwitchoverException as exc:
         logging.error('unable to switchover: %s', exc)
         sys.exit(1)
+
+
+def failover(opts, conf):
+    """
+    Operations during failover.
+    """
+    try:
+        fail = utils.Failover(conf=conf)
+        if opts.reset:
+            return fail.reset()
+    except FailoverException as exc:
+        logging.error('unable to reset failover state: %s', exc)
+        sys.exit(1)
+
+
+def reset_all(opts, conf):
+    """
+    Resets all nodes in ZK, except for zk.MEMBERS_PATH
+    """
+    conf.set('global', 'iteration_timeout', 5)
+    zk = zookeeper.Zookeeper(config=conf, plugins=None)
+    logging.debug("resetting all ZK nodes")
+    all_nodes = zk.get_children("")
+    if all_nodes is None:
+        logging.error("Could not get nodes to reset")
+        all_nodes = []
+    nodes_to_delete = [x for x in all_nodes if x != zk.MEMBERS_PATH]
+    if not opts.force:
+        prompt = f'Nodes to delete: {", ".join(nodes_to_delete)}\n' \
+                 f'This is a potentially dangerous action. Proceed [y/n]?\n'
+        ans = input(prompt)
+        if ans == 'n':
+            return
+        elif ans != 'y':
+            print('Incorrect value, please type "y" or "n"')
+            return
+    for node in nodes_to_delete:
+        logging.debug(f'resetting path "{node}"')
+        if not zk.delete(node, recursive=True):
+            raise ResetException(f'Could not reset node "{node}" in ZK')
+    logging.debug("ZK structures are reset")
 
 
 def show_info(opts, conf):
@@ -357,6 +398,32 @@ def parse_args():
     switch_arg.add_argument('--primary', help='override current primary hostname', default=None, metavar='<fqdn>')
     switch_arg.add_argument('--timeline', help='override current primary timeline', default=None, metavar='<fqdn>')
     switch_arg.set_defaults(action=switchover)
+
+    fail_arg = subarg.add_parser(
+        'failover',
+        help='operations on failover state',
+        description="""
+           Change state of current failover.
+           """,
+    )
+    fail_arg.add_argument(
+        '-r',
+        '--reset',
+        help='reset failover state in ZK (potentially disruptive)',
+        default=False,
+        action='store_true',
+    )
+    fail_arg.set_defaults(action=failover)
+
+    reset_all_arg = subarg.add_parser('reset-all', help='reset all nodes except members')
+    reset_all_arg.add_argument(
+        '-f',
+        '--force',
+        help='do not prompt',
+        default=False,
+        action='store_true',
+    )
+    reset_all_arg.set_defaults(action=reset_all)
 
     try:
         return arg.parse_args()
